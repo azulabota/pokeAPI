@@ -1,6 +1,6 @@
 .env
 __pycache__/
 *.pyc
-data/*.db
+data/*.db*
 node_modules/
 playwright_results/

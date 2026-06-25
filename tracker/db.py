@@ -60,7 +60,7 @@ def get_last_stock(product_id, store_chain, store_id):
     row = conn.execute(
         """SELECT in_stock, stock_level, checked_at FROM stock_snapshots
            WHERE product_id = ? AND store_chain = ? AND store_id = ?
-           ORDER BY checked_at DESC LIMIT 1""",
+           ORDER BY id DESC LIMIT 1""",
         (str(product_id), store_chain, str(store_id))
     ).fetchone()
     conn.close()
