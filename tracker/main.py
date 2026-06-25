@@ -20,9 +20,8 @@ from dotenv import load_dotenv
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"))
 
 from tracker.db import init_db, get_restock_events, get_store_pattern
-from tracker.target import run_target_check
 from tracker.bestbuy import run_bestbuy_check
-from tracker.products import TARGET_PRODUCTS, BESTBUY_PRODUCTS
+from tracker.products import BESTBUY_PRODUCTS
 
 
 def get_zip_codes():
@@ -110,15 +109,11 @@ def main():
     
     total_restocks = []
     
-    # Target check (Playwright — headless browser)
+    # Target check — manually disabled (PerimeterX blocks automated access)
     if not bestbuy_only:
-        try:
-            restocks = run_target_check(zip_codes)
-            total_restocks.extend(restocks)
-        except Exception as e:
-            print(f"\n❌ Target check failed: {e}")
-            import traceback
-            traceback.print_exc()
+        print("\n⚠️  Target check skipped — site uses PerimeterX bot protection.")
+        print("   Use the dashboard's manual checklist or release calendar instead.")
+        print('   Or check Target on your phone via target.com -> set your store -> "Pick up in store"')
     
     # Best Buy check (simple API calls)
     if not target_only:

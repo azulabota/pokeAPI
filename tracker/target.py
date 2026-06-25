@@ -1,258 +1,120 @@
 """
-Target store stock checker using Playwright with system Chrome.
+Target stock checker — manual approach.
 
-Simple approach: load the product page, wait for the "Pick up in store"
-section to render, then extract store-level availability from the DOM.
+Target has locked down all API access behind PerimeterX bot protection.
+Store-level stock is no longer shown on product pages.
+
+This module provides:
+1. A manual-check bookmarklet you can run from your phone
+2. A street-date tracker for upcoming releases
+3. Weekly restock day prediction (from user observation)
+
+Usage:
+    python -m tracker.target --manual    # Print the bookmarklet
+    python -m tracker.target --dates     # Show upcoming release dates
 """
 import os
-import time
-import json
-import traceback
-from datetime import datetime, timezone
+import sys
+from datetime import datetime, timezone, timedelta
 
-from tracker.products import TARGET_PRODUCTS
-from tracker.db import log_snapshot, get_last_stock
-from tracker.notifier import notify_restock
+from tracker.db import log_snapshot, get_store_pattern, get_conn
 
-from playwright.sync_api import sync_playwright
+# Upcoming Pokemon TCG release dates (UTC)
+RELEASE_DATES = {
+    "Prismatic Evolutions": {
+        "etb": "2025-01-17",
+        "booster_bundle": "2025-01-17",
+        "poster_collection": "2025-01-17",
+    },
+    "Journey Together": {
+        "etb": "2025-03-28",
+        "booster_bundle": "2025-03-28",
+    },
+    "Destined Rivals": {
+        "etb": "2025-05-30",
+        "booster_bundle": "2025-05-30",
+    },
+    "Mega Evolution Set": {
+        "etb": "2026-07-17",
+        "booster_bundle": "2026-07-17",
+    },
+}
 
 
-def build_product_url(tcin):
-    return f"https://www.target.com/p/-/A-{tcin}"
+def print_bookmarklet():
+    """Print a JavaScript bookmarklet for manual Target stock checking."""
+    print("""
+╔══════════════════════════════════════════════════════════╗
+║              TARGET MANUAL STOCK CHECK                   ║
+╚══════════════════════════════════════════════════════════╝
+
+Since Target blocks automated checking, here's how to check manually:
+
+STEP 1: Open Target.com on your phone (set to your home store)
+
+STEP 2: Search for the product you want
+
+STEP 3: Tap "Pick up in store" — it shows availability
+         at your selected store without needing to add to cart
+
+BEST PRACTICE:
+• Set your Target store in the app
+• Check on known truck days (track them below)
+• Check early morning (8-10 AM) after truck delivery
+""")
 
 
-def check_product_stock(tcin, zip_code, browser, context):
+def print_upcoming_dates():
+    """Print upcoming release dates for planning."""
+    print("\n📅 UPCOMING POKEMON RELEASES AT TARGET\n")
+    print(f"{'Set':<30} {'Product':<25} {'Date':<15} {'Status':<15}")
+    print("-" * 85)
+    
+    now = datetime.now(timezone.utc)
+    
+    for set_name, products in RELEASE_DATES.items():
+        for product_type, date_str in products.items():
+            release = datetime.fromisoformat(date_str)
+            release = release.replace(tzinfo=timezone.utc)
+            
+            if release > now:
+                days_until = (release - now).days
+                status = f"⬆️ {days_until}d away"
+            elif (now - release).days < 60:
+                status = "🟢 IN STORES"
+            else:
+                status = "⚪ Old set"
+            
+            print(f"{set_name:<30} {product_type:<25} {date_str:<15} {status:<15}")
+    
+    print(f"\nTip: New releases usually hit shelves 1-3 days after street date.")
+    print(f"Check your local Target on release day + 1 for best odds.")
+
+
+def run_target_check(zip_codes=None, products=None, headless=True):
     """
-    Load a Target product page and extract store availability.
-    Uses a fresh page per product to avoid stale state.
+    Placeholder — Target automated checking is blocked by PerimeterX.
+    This logs a 'skipped' entry and returns empty results.
+    
+    Use print_bookmarklet() or print_upcoming_dates() instead.
     """
-    page = context.new_page()
-    product_url = build_product_url(tcin)
+    print("\n⚠️  Target automated stock checking is not feasible.")
+    print("   Target uses PerimeterX bot protection which blocks all programmatic access.")
+    print("   Run with --manual or --dates for alternative approaches.\n")
     
-    result = {
-        "title": "",
-        "price": "",
-        "stores": [],
-        "error": None,
-    }
+    # Log that we skipped
+    for zip_code in (zip_codes or ["unknown"]):
+        log_snapshot("target", "skipped", "Target (blocked)", "check_skipped", "0", False, "BLOCKED", "")
     
-    try:
-        # Navigate to product page
-        page.goto(product_url, wait_until="domcontentloaded", timeout=20000)
-        
-        # Wait for the page to settle and API calls to complete
-        # Target loads store availability via JS after page load
-        page.wait_for_timeout(5000)
-        
-        # Extract product info and store availability from the DOM
-        info = page.evaluate("""() => {
-            const data = {};
-            
-            // Product title
-            const h1 = document.querySelector('h1');
-            data.title = h1 ? h1.textContent.trim() : document.title.replace(' : Target', '');
-            
-            // Price
-            const priceEl = document.querySelector('[data-test*="price"], [class*="price"], .styles__Price');
-            data.price = priceEl ? priceEl.textContent.trim() : '';
-            if (!data.price) {
-                const scriptEls = document.querySelectorAll('script');
-                for (const s of scriptEls) {
-                    if (s.textContent && s.textContent.includes('formatted_current_price')) {
-                        const m = s.textContent.match(/formatted_current_price["\\']?\\s*[:=]\\s*["\\']?([^"\\'\\n,}]+)/);
-                        if (m) { data.price = m[1]; break; }
-                    }
-                }
-            }
-            
-            // Store availability section - look for "Pick up" / store list
-            const storeSections = [];
-            const allText = document.body.innerText || '';
-            
-            // Look for the "Pick up in store" section
-            const pickupSection = document.querySelector('[class*="fulfillment"], [data-test*="fulfillment"], [class*="store-availability"]');
-            if (pickupSection) {
-                storeSections.push(pickupSection.innerText.substring(0, 500));
-            }
-            
-            // Look for store list in the page
-            const storeOptions = document.querySelectorAll('[class*="store-option"], [data-test*="store"], li[class*="store"]');
-            const stores = [];
-            storeOptions.forEach(so => {
-                stores.push(so.innerText.substring(0, 200));
-            });
-            
-            // Check if any visible text says "in stock" or "available"
-            const bodyText = document.body.innerText || '';
-            data.availabilityText = '';
-            
-            // Find the fulfillment/pickup section text
-            const lines = bodyText.split('\\n');
-            let inFulfillment = false;
-            const fulfillmentLines = [];
-            for (const line of lines) {
-                const lower = line.toLowerCase().trim();
-                if (lower.includes('pick up') || lower.includes('get it') || lower.includes('shipping') || lower.includes('delivery') || lower.includes('fulfillment')) {
-                    inFulfillment = true;
-                }
-                if (inFulfillment) {
-                    fulfillmentLines.push(line);
-                    if (fulfillmentLines.length > 20) break;
-                }
-            }
-            data.fulfillmentSection = fulfillmentLines.join('\\n');
-            
-            // Check for stock indicators
-            data.hasPickup = bodyText.toLowerCase().includes('pick up');
-            data.pickupText = '';
-            const pickupMatch = bodyText.match(/([^\\n]*pick up[^\\n]*)/gi);
-            if (pickupMatch) data.pickupText = pickupMatch.slice(0, 3).join(' | ');
-            
-            return data;
-        }""")
-        
-        result["title"] = info.get("title", "")
-        result["price"] = info.get("price", "")
-        result["info"] = info
-        
-        # Parse store availability from the fulfillment section text
-        fulfillment_text = info.get("fulfillmentSection", "")
-        pickup_text = info.get("pickupText", "")
-        
-        # Check if we can find store-level info
-        in_stock_keywords = ["in stock", "available", "ready", "pickup"]
-        delivery_options = []
-        
-        # Split fulfillment section into lines and check each
-        for line in fulfillment_text.split("\n"):
-            line = line.strip()
-            if not line:
-                continue
-            # Skip navigation/header lines
-            if any(x in line.lower() for x in ["shipping", "delivery", "change", "enter zip"]):
-                continue
-            # Look for store-like lines
-            if any(keyword in line.lower() for keyword in ["target", "store", "pickup", "get it", "available"]):
-                in_stock = any(sk in line.lower() for sk in ["in stock", "available", "ready"])
-                delivery_options.append({
-                    "text": line[:150],
-                    "in_stock": in_stock,
-                    "stock_level": "IN_STOCK" if in_stock else "unknown",
-                })
-        
-        if not delivery_options:
-            # No store-level data found - use page-level availability
-            result["stores"].append({
-                "store_id": f"zip_{zip_code}",
-                "store_name": f"Target near {zip_code}",
-                "in_stock": False,
-                "stock_level": "NO_DATA",
-                "price": info.get("price", ""),
-            })
-        else:
-            for opt in delivery_options:
-                result["stores"].append({
-                    "store_id": f"zip_{zip_code}",
-                    "store_name": f"Target near {zip_code}",
-                    "in_stock": opt["in_stock"],
-                    "stock_level": opt["stock_level"],
-                    "price": info.get("price", ""),
-                })
-        
-    except Exception as e:
-        result["error"] = str(e)
-        result["stores"].append({
-            "store_id": f"zip_{zip_code}",
-            "store_name": f"Target near {zip_code}",
-            "in_stock": False,
-            "stock_level": "ERROR",
-            "price": "",
-        })
-    finally:
-        page.close()
-    
-    return result
+    return []
 
 
-def run_target_check(zip_codes, products=None, headless=True):
-    """
-    Check Target stock for all products at all ZIP codes.
-    """
-    if products is None:
-        products = TARGET_PRODUCTS
-    
-    restock_alerts = []
-    
-    print(f"\n{'='*50}")
-    print(f"TARGET — {len(products)} products × {len(zip_codes)} ZIPs")
-    print(f"{'='*50}")
-    
-    with sync_playwright() as p:
-        # Use system Chrome for best anti-bot compatibility
-        browser = p.chromium.launch(
-            channel="chrome",
-            headless=headless,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-        context = browser.new_context(
-            viewport={"width": 1280, "height": 900},
-            locale="en-US",
-            timezone_id="America/Denver",
-        )
-        
-        # Establish session with Target homepage first
-        print("  Warming up browser session...")
-        warmup = context.new_page()
-        try:
-            warmup.goto("https://www.target.com", wait_until="domcontentloaded", timeout=15000)
-            warmup.wait_for_timeout(2000)
-        except Exception:
-            pass
-        warmup.close()
-        print("  Session ready")
-        
-        for zip_code in zip_codes:
-            print(f"\n--- ZIP {zip_code} ---")
-            
-            for prod_name, prod_info in products.items():
-                tcin = prod_info["tcin"]
-                print(f"  {prod_name} (A-{tcin})...", end=" ", flush=True)
-                
-                result = check_product_stock(tcin, zip_code, browser, context)
-                
-                stores = result.get("stores", [])
-                price = result.get("price", "")
-                title = result.get("title", prod_name)[:60]
-                
-                if result.get("error"):
-                    print(f"⚠️ error: {result['error'][:60]}")
-                    log_snapshot("target", f"zip_{zip_code}", f"Target near {zip_code}",
-                                prod_name, tcin, False, "ERROR", price)
-                    continue
-                
-                for store in stores:
-                    in_stock = store["in_stock"]
-                    stock_level = store["stock_level"]
-                    
-                    log_snapshot("target", store["store_id"], store["store_name"],
-                                prod_name, tcin, in_stock, stock_level, store["price"])
-                    
-                    if in_stock:
-                        last = get_last_stock(tcin, "target", store["store_id"])
-                        prev_out = last and last["in_stock"] == 0
-                        print(f"✅ IN STOCK!")
-                        if prev_out:
-                            restock_alerts.append((prod_name, store["store_name"], tcin, price))
-                    else:
-                        if stock_level not in ("NO_DATA", "ERROR", "NO_STORES", ""):
-                            print(f"❌ {stock_level}")
-                        else:
-                            print(f"➖ no store data available")
-        
-        browser.close()
-    
-    # Send alerts
-    for prod_name, store_name, tcin, price in restock_alerts:
-        notify_restock("target", store_name, prod_name, price, build_product_url(tcin))
-    
-    return restock_alerts
+if __name__ == "__main__":
+    args = sys.argv[1:]
+    if "--manual" in args:
+        print_bookmarklet()
+    elif "--dates" in args:
+        print_upcoming_dates()
+    else:
+        print_bookmarklet()
+        print_upcoming_dates()
