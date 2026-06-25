@@ -1,65 +1,55 @@
 """
 Products to track at each retailer.
 
-⚠️  Target TCINs need periodic verification — these are community-sourced
-    and may change when products sell out and are delisted.
-    Run `python find_tcins.py --search "pokemon 151" --visible` to find current TCINs.
+TCINs verified working as of June 25, 2026.
+Run `python3 find_tcins.py` or `python3 verify_tcins.py` to refresh.
 """
 
-# Target products tracked by TCIN (Target's internal product ID)
-# Find TCINs from the URL: target.com/p/-/A-XXXXXXXX
+# Target products tracked by TCIN (internal product ID from Target.com URLs)
 TARGET_PRODUCTS = {
-    # === Scarlet & Violet 151 ===
-    "151 Booster Bundle": {
-        "tcin": "89531271",
-        "dpci": "207-04-0119",
-        "category": "booster_bundle",
-        "priority": 1,
-    },
-    # === Prismatic Evolutions ===
+    # === HIGH PRIORITY - Prismatic Evolutions ===
     "Prismatic Evolutions ETB": {
-        "tcin": "90526805",
-        "dpci": "207-04-0165",
+        "tcin": "1008746912",
         "category": "etb",
         "priority": 1,
     },
-    "Prismatic Evolutions Booster Bundle": {
-        "tcin": "90600304",
-        "dpci": "207-04-0169",
-        "category": "booster_bundle",
+    # === HIGH PRIORITY - Scarlet & Violet 151 ===
+    "151 Booster Pack": {
+        "tcin": "1001304528",
+        "category": "booster_pack",
         "priority": 1,
     },
-    # === Surging Sparks ===
-    "Surging Sparks Booster Bundle": {
-        "tcin": "90435360",
-        "dpci": "207-04-0159",
-        "category": "booster_bundle",
+    # === MEDIUM PRIORITY ===
+    "Stellar Crown Art Bundle": {
+        "tcin": "93605824",
+        "category": "collection_box",
         "priority": 2,
     },
-    "Surging Sparks ETB": {
-        "tcin": "90435359",
-        "dpci": "207-04-0158",
+    "Masks of Ogerpon Premium Collection": {
+        "tcin": "1004842404",
+        "category": "collection_box",
+        "priority": 2,
+    },
+    "Mega Evolution Perfect Order ETB": {
+        "tcin": "1010767187",
         "category": "etb",
         "priority": 2,
     },
-    # === Twilight Masquerade ===
-    "Twilight Masquerade Booster Bundle": {
-        "tcin": "89531276",
-        "dpci": "207-04-0120",
-        "category": "booster_bundle",
+    # === LOWER PRIORITY / NICHE ===
+    "Astral Radiance Build & Battle Box": {
+        "tcin": "92955640",
+        "category": "build_battle",
         "priority": 3,
     },
-    # === Paldean Fates ===
-    "Paldean Fates Booster Bundle": {
-        "tcin": "89344422",
-        "dpci": "207-04-0126",
-        "category": "booster_bundle",
+    "SV1 Booster Pack (Koraidon)": {
+        "tcin": "1001148307",
+        "category": "booster_pack",
         "priority": 3,
     },
 }
 
 # Best Buy products tracked by SKU
-# Find SKU from the URL: bestbuy.com/site/-/XXXXXXXX.p
+# Find SKU from: bestbuy.com/site/-/XXXXXXXX.p
 BESTBUY_PRODUCTS = {
     "Prismatic Evolutions ETB": {
         "sku": "6591754",

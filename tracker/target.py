@@ -1,204 +1,185 @@
 """
-Target store stock checker using Playwright with REAL Chrome.
+Target store stock checker using Playwright with system Chrome.
 
-Calls Target's CDUI fulfillment API directly, which provides
-store-level stock data without needing the RedCircle paid service.
-
-This approach uses a headless browser session to get the auth token,
-then queries the fulfillment endpoint for each product.
+Simple approach: load the product page, wait for the "Pick up in store"
+section to render, then extract store-level availability from the DOM.
 """
-import json
 import os
 import time
-import re
+import json
 import traceback
-import requests
-from urllib.parse import urlencode
+from datetime import datetime, timezone
 
 from tracker.products import TARGET_PRODUCTS
 from tracker.db import log_snapshot, get_last_stock
 from tracker.notifier import notify_restock
 
-CDUI_BASE = "https://www.target.com/cdui_orchestrations/v1/pages/pdp/deferred_enrichment/modules"
-LOCATION_API = "https://api.target.com/location_fulfillment_aggregations/v1/secured/preferred_stores"
+from playwright.sync_api import sync_playwright
 
 
 def build_product_url(tcin):
     return f"https://www.target.com/p/-/A-{tcin}"
 
 
-def get_stores_for_zip(zip_code, page):
+def check_product_stock(tcin, zip_code, browser, context):
     """
-    Get preferred store IDs for a ZIP code by navigating to a product page
-    and extracting the store context from the page.
-    Returns list of store_ids.
+    Load a Target product page and extract store availability.
+    Uses a fresh page per product to avoid stale state.
     """
+    page = context.new_page()
+    product_url = build_product_url(tcin)
+    
+    result = {
+        "title": "",
+        "price": "",
+        "stores": [],
+        "error": None,
+    }
+    
     try:
-        # Navigate to any product page to establish browser context
-        page.goto(f"https://www.target.com/p/-/A-89531271", 
-                   wait_until="domcontentloaded", timeout=20000)
-        page.wait_for_timeout(3000)
+        # Navigate to product page
+        page.goto(product_url, wait_until="domcontentloaded", timeout=20000)
         
-        # Extract store info from the page
-        store_data = page.evaluate("""() => {
-            // Look for store info in the page
-            const scripts = document.querySelectorAll('script');
-            for (const s of scripts) {
-                if (s.textContent && s.textContent.includes('preferred_stores')) {
-                    try {
-                        const match = s.textContent.match(/preferred_stores["\\]]+[^\\]]+\\]\\]/);
-                        return match ? match[0] : null;
-                    } catch(e) {}
+        # Wait for the page to settle and API calls to complete
+        # Target loads store availability via JS after page load
+        page.wait_for_timeout(5000)
+        
+        # Extract product info and store availability from the DOM
+        info = page.evaluate("""() => {
+            const data = {};
+            
+            // Product title
+            const h1 = document.querySelector('h1');
+            data.title = h1 ? h1.textContent.trim() : document.title.replace(' : Target', '');
+            
+            // Price
+            const priceEl = document.querySelector('[data-test*="price"], [class*="price"], .styles__Price');
+            data.price = priceEl ? priceEl.textContent.trim() : '';
+            if (!data.price) {
+                const scriptEls = document.querySelectorAll('script');
+                for (const s of scriptEls) {
+                    if (s.textContent && s.textContent.includes('formatted_current_price')) {
+                        const m = s.textContent.match(/formatted_current_price["\\']?\\s*[:=]\\s*["\\']?([^"\\'\\n,}]+)/);
+                        if (m) { data.price = m[1]; break; }
+                    }
                 }
             }
-            return null;
-        }""")
-        
-        # Default to a common Denver store if nothing found
-        return ["2052"]
-    except Exception as e:
-        print(f"  Store lookup failed: {e}")
-        return ["2052"]
-
-
-def get_cdui_fulfillment(tcin, store_id, zip_code, page):
-    """
-    Get fulfillment data from Target's CDUI endpoint.
-    Uses the browser page's established session to make the call.
-    """
-    try:
-        # Extract the auth key from the page context (it's set dynamically)
-        auth_token = page.evaluate("""() => {
-            // Look for the CDUI auth token in page state
-            const scripts = document.querySelectorAll('script');
-            for (const s of scripts) {
-                if (s.textContent && s.textContent.includes('cdui') && s.textContent.includes('auth')) {
-                    const match = s.textContent.match(/["']auth["']\\s*:\\s*["']([^"']+)["']/);
-                    if (match) return match[1];
+            
+            // Store availability section - look for "Pick up" / store list
+            const storeSections = [];
+            const allText = document.body.innerText || '';
+            
+            // Look for the "Pick up in store" section
+            const pickupSection = document.querySelector('[class*="fulfillment"], [data-test*="fulfillment"], [class*="store-availability"]');
+            if (pickupSection) {
+                storeSections.push(pickupSection.innerText.substring(0, 500));
+            }
+            
+            // Look for store list in the page
+            const storeOptions = document.querySelectorAll('[class*="store-option"], [data-test*="store"], li[class*="store"]');
+            const stores = [];
+            storeOptions.forEach(so => {
+                stores.push(so.innerText.substring(0, 200));
+            });
+            
+            // Check if any visible text says "in stock" or "available"
+            const bodyText = document.body.innerText || '';
+            data.availabilityText = '';
+            
+            // Find the fulfillment/pickup section text
+            const lines = bodyText.split('\\n');
+            let inFulfillment = false;
+            const fulfillmentLines = [];
+            for (const line of lines) {
+                const lower = line.toLowerCase().trim();
+                if (lower.includes('pick up') || lower.includes('get it') || lower.includes('shipping') || lower.includes('delivery') || lower.includes('fulfillment')) {
+                    inFulfillment = true;
+                }
+                if (inFulfillment) {
+                    fulfillmentLines.push(line);
+                    if (fulfillmentLines.length > 20) break;
                 }
             }
-            return null;
+            data.fulfillmentSection = fulfillmentLines.join('\\n');
+            
+            // Check for stock indicators
+            data.hasPickup = bodyText.toLowerCase().includes('pick up');
+            data.pickupText = '';
+            const pickupMatch = bodyText.match(/([^\\n]*pick up[^\\n]*)/gi);
+            if (pickupMatch) data.pickupText = pickupMatch.slice(0, 3).join(' | ');
+            
+            return data;
         }""")
         
-        params = {
-            "auth": auth_token or "",
-            "purchasable_store_ids": store_id,
-            "zip": zip_code,
-            "latitude": "39.74",
-            "longitude": "-104.98",
-            "state": "CO",
-            "channel": "web",
-            "source": "top-of-funnel",
-        }
+        result["title"] = info.get("title", "")
+        result["price"] = info.get("price", "")
+        result["info"] = info
         
-        url = f"{CDUI_BASE}?{urlencode(params)}"
+        # Parse store availability from the fulfillment section text
+        fulfillment_text = info.get("fulfillmentSection", "")
+        pickup_text = info.get("pickupText", "")
         
-        resp = page.evaluate(f"""
-            fetch('{url}', {{credentials: 'include'}})
-                .then(r => r.json())
-                .then(d => JSON.stringify(d))
-                .catch(e => JSON.stringify({{error: e.message}}))
-        """)
+        # Check if we can find store-level info
+        in_stock_keywords = ["in stock", "available", "ready", "pickup"]
+        delivery_options = []
         
-        data = json.loads(resp)
+        # Split fulfillment section into lines and check each
+        for line in fulfillment_text.split("\n"):
+            line = line.strip()
+            if not line:
+                continue
+            # Skip navigation/header lines
+            if any(x in line.lower() for x in ["shipping", "delivery", "change", "enter zip"]):
+                continue
+            # Look for store-like lines
+            if any(keyword in line.lower() for keyword in ["target", "store", "pickup", "get it", "available"]):
+                in_stock = any(sk in line.lower() for sk in ["in stock", "available", "ready"])
+                delivery_options.append({
+                    "text": line[:150],
+                    "in_stock": in_stock,
+                    "stock_level": "IN_STOCK" if in_stock else "unknown",
+                })
         
-        if "error" in data:
-            return {"error": data["error"]}
-        
-        modules = data.get("modules", [])
-        fulfillment_module = None
-        for m in modules:
-            if m.get("module_type") == "ProductDetailFulfillment":
-                fulfillment_module = m
-                break
-        
-        if not fulfillment_module:
-            # Try the sapphire API which has product data
-            return try_sapphire_api(tcin, zip_code, page)
-        
-        return fulfillment_module.get("module_data", {})
-        
-    except Exception as e:
-        print(f"  CDUI error: {e}")
-        return {"error": str(e)}
-
-
-def try_sapphire_api(tcin, zip_code, page):
-    """Fallback: try to get product data including fulfillment from the sapphire API."""
-    try:
-        visitor_id = page.evaluate("""() => {
-            const match = document.cookie.match(/visitorId=([^;]+)/);
-            return match ? match[1] : Math.random().toString(36).substring(2, 15) + Date.now().toString(36);
-        }""")
-        
-        url = f"https://sapphire-api.target.com/sapphire/runtime/api/v1/raw/www.target.com/p/-/A-{tcin}?channel=web&context=geo,{zip_code}&service=redoak,digital-web&source=top-of-funnel&state=CO&zip={zip_code}&visitor_id={visitor_id}"
-        
-        resp = page.evaluate(f"""
-            fetch('{url}', {{credentials: 'include'}})
-                .then(r => r.json())
-                .then(d => JSON.stringify(d))
-                .catch(e => JSON.stringify({{error: e.message}}))
-        """)
-        
-        data = json.loads(resp)
-        if "error" in data:
-            return {"error": data["error"]}
-        
-        pages = data.get("pages", [])
-        if pages:
-            product = pages[0].get("product", {})
-            if product:
-                fulfillment = product.get("fulfillment", {})
-                item = product.get("item", {})
-                price = product.get("price", {})
-                
-                store_options = fulfillment.get("store_options", [])
-                pickup = fulfillment.get("order_pickup_options", [])
-                
-                stores = []
-                for s in store_options:
-                    stores.append({
-                        "store_id": str(s.get("store_id", "")),
-                        "location_name": s.get("location_name", ""),
-                        "location_city": s.get("location_city", ""),
-                        "location_address": s.get("location_address", ""),
-                        "in_stock": s.get("in_stock", False),
-                        "stock": s.get("stock", ""),
-                        "formatted_price": s.get("formatted_price", ""),
-                    })
-                for p in pickup:
-                    sid = str(p.get("store_id", ""))
-                    if not any(s["store_id"] == sid for s in stores):
-                        stores.append({
-                            "store_id": sid,
-                            "location_name": p.get("store_name", ""),
-                            "location_city": p.get("store_city", ""),
-                            "location_address": p.get("store_address", ""),
-                            "in_stock": p.get("is_available", False),
-                            "stock": "IN_STOCK" if p.get("is_available") else "OUT_OF_STOCK",
-                            "formatted_price": price.get("formatted_current_price", ""),
-                        })
-                
-                return {
-                    "stores": stores,
-                    "product_title": item.get("product_description", {}).get("title", ""),
-                    "price": price.get("formatted_current_price", ""),
-                }
-        
-        return {"stores": [], "product_title": "", "price": ""}
+        if not delivery_options:
+            # No store-level data found - use page-level availability
+            result["stores"].append({
+                "store_id": f"zip_{zip_code}",
+                "store_name": f"Target near {zip_code}",
+                "in_stock": False,
+                "stock_level": "NO_DATA",
+                "price": info.get("price", ""),
+            })
+        else:
+            for opt in delivery_options:
+                result["stores"].append({
+                    "store_id": f"zip_{zip_code}",
+                    "store_name": f"Target near {zip_code}",
+                    "in_stock": opt["in_stock"],
+                    "stock_level": opt["stock_level"],
+                    "price": info.get("price", ""),
+                })
         
     except Exception as e:
-        return {"error": f"sapphire fallback failed: {e}"}
+        result["error"] = str(e)
+        result["stores"].append({
+            "store_id": f"zip_{zip_code}",
+            "store_name": f"Target near {zip_code}",
+            "in_stock": False,
+            "stock_level": "ERROR",
+            "price": "",
+        })
+    finally:
+        page.close()
+    
+    return result
 
 
 def run_target_check(zip_codes, products=None, headless=True):
     """
-    Check Target stock using Playwright with system Chrome.
+    Check Target stock for all products at all ZIP codes.
     """
     if products is None:
         products = TARGET_PRODUCTS
-    
-    from playwright.sync_api import sync_playwright
     
     restock_alerts = []
     
@@ -207,102 +188,70 @@ def run_target_check(zip_codes, products=None, headless=True):
     print(f"{'='*50}")
     
     with sync_playwright() as p:
-        # Launch real Chrome (not Playwright Chromium) for better fingerprint
+        # Use system Chrome for best anti-bot compatibility
         browser = p.chromium.launch(
-            channel="chrome",  # Uses installed Chrome
+            channel="chrome",
             headless=headless,
-            args=[
-                "--disable-blink-features=AutomationControlled",
-                "--no-sandbox",
-            ],
+            args=["--disable-blink-features=AutomationControlled"],
         )
-        
         context = browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/125.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1280, "height": 720},
+            viewport={"width": 1280, "height": 900},
             locale="en-US",
             timezone_id="America/Denver",
-            geolocation={"latitude": 39.74, "longitude": -104.98},
-            permissions=["geolocation"],
         )
         
-        page = context.new_page()
-        
-        # First, load a Target page to establish session
-        print("  Initializing session...")
+        # Establish session with Target homepage first
+        print("  Warming up browser session...")
+        warmup = context.new_page()
         try:
-            page.goto("https://www.target.com", wait_until="domcontentloaded", timeout=15000)
-            page.wait_for_timeout(2000)
-            print("  Session established")
-        except Exception as e:
-            print(f"  Session init warning: {e}")
+            warmup.goto("https://www.target.com", wait_until="domcontentloaded", timeout=15000)
+            warmup.wait_for_timeout(2000)
+        except Exception:
+            pass
+        warmup.close()
+        print("  Session ready")
         
         for zip_code in zip_codes:
             print(f"\n--- ZIP {zip_code} ---")
             
-            # Get store IDs for this ZIP
-            store_ids = get_stores_for_zip(zip_code, page)
-            
             for prod_name, prod_info in products.items():
                 tcin = prod_info["tcin"]
-                print(f"  Checking {prod_name} (TCIN {tcin})...")
+                print(f"  {prod_name} (A-{tcin})...", end=" ", flush=True)
                 
-                result = None
-                
-                # Try CDUI fulfillment API first
-                for store_id in store_ids:
-                    data = get_cdui_fulfillment(tcin, store_id, zip_code, page)
-                    if data and "stores" in data:
-                        result = data
-                        break
-                
-                # Fallback: try sapphire API
-                if not result or "error" in result:
-                    print(f"  CDUI empty, trying sapphire API...")
-                    result = try_sapphire_api(tcin, zip_code, page)
-                
-                if not result or "error" in result:
-                    print(f"  ⚠️  Could not get stock data for {prod_name}: {result.get('error', 'unknown')}")
-                    log_snapshot("target", f"zip_{zip_code}", f"Target near {zip_code}", 
-                                prod_name, tcin, False, "NO_DATA", "")
-                    continue
+                result = check_product_stock(tcin, zip_code, browser, context)
                 
                 stores = result.get("stores", [])
-                if not stores:
-                    print(f"  ⚠️  No store data in response")
+                price = result.get("price", "")
+                title = result.get("title", prod_name)[:60]
+                
+                if result.get("error"):
+                    print(f"⚠️ error: {result['error'][:60]}")
                     log_snapshot("target", f"zip_{zip_code}", f"Target near {zip_code}",
-                                prod_name, tcin, False, "NO_STORES", "")
+                                prod_name, tcin, False, "ERROR", price)
                     continue
                 
                 for store in stores:
-                    store_id = store.get("store_id", "unknown")
-                    store_name = store.get("location_name", f"Target at {store.get('location_city', zip_code)}")
-                    in_stock = store.get("in_stock", False)
-                    stock_level = store.get("stock", "")
-                    price = store.get("formatted_price", result.get("price", ""))
+                    in_stock = store["in_stock"]
+                    stock_level = store["stock_level"]
                     
-                    log_snapshot("target", store_id, store_name, prod_name, tcin,
-                                in_stock, stock_level, price)
+                    log_snapshot("target", store["store_id"], store["store_name"],
+                                prod_name, tcin, in_stock, stock_level, store["price"])
                     
                     if in_stock:
-                        last = get_last_stock(tcin, "target", store_id)
+                        last = get_last_stock(tcin, "target", store["store_id"])
                         prev_out = last and last["in_stock"] == 0
-                        
-                        print(f"  ✅ {prod_name} IN STOCK at {store_name} ({price})")
-                        
+                        print(f"✅ IN STOCK!")
                         if prev_out:
-                            restock_alerts.append((prod_name, store_name, tcin, price))
+                            restock_alerts.append((prod_name, store["store_name"], tcin, price))
                     else:
-                        if stock_level not in ("", "NO_DATA", "NO_STORES", "UNKNOWN"):
-                            print(f"  ❌ {prod_name} at {store_name} — {stock_level}")
+                        if stock_level not in ("NO_DATA", "ERROR", "NO_STORES", ""):
+                            print(f"❌ {stock_level}")
+                        else:
+                            print(f"➖ no store data available")
         
         browser.close()
     
-    # Send Telegram alerts
+    # Send alerts
     for prod_name, store_name, tcin, price in restock_alerts:
         notify_restock("target", store_name, prod_name, price, build_product_url(tcin))
     
