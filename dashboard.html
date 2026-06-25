@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PokeAPI — Stock Dashboard</title>
+<style>
+  :root {
+    --bg: #0f0f12;
+    --card: #1a1a22;
+    --border: #2a2a35;
+    --text: #e2e2e8;
+    --muted: #88889a;
+    --green: #22c55e;
+    --red: #ef4444;
+    --yellow: #eab308;
+    --blue: #3b82f6;
+    --accent: #a855f7;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    padding: 20px;
+    min-height: 100vh;
+  }
+  .container { max-width: 1000px; margin: 0 auto; }
+
+  /* Header */
+  .header {
+    display: flex; justify-content: space-between; align-items: center;
+    flex-wrap: wrap; gap: 12px; margin-bottom: 24px;
+  }
+  .header h1 {
+    font-size: 24px; font-weight: 700;
+    background: linear-gradient(135deg, var(--accent), var(--blue));
+    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+  }
+  .header-info {
+    display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  }
+  .badge {
+    font-size: 12px; padding: 4px 10px; border-radius: 999px;
+    background: var(--card); color: var(--muted); border: 1px solid var(--border);
+  }
+  .badge.live { background: rgba(34,197,94,0.15); color: var(--green); border-color: var(--green); }
+
+  /* Stats bar */
+  .stats {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 12px; margin-bottom: 24px;
+  }
+  .stat-card {
+    background: var(--card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 14px; text-align: center;
+  }
+  .stat-card .num { font-size: 28px; font-weight: 700; }
+  .stat-card .label { font-size: 11px; color: var(--muted); margin-top: 4px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .stat-card .num.green { color: var(--green); }
+  .stat-card .num.red { color: var(--red); }
+  .stat-card .num.accent { color: var(--accent); }
+
+  /* Store sections */
+  .store-section { margin-bottom: 20px; }
+  .store-header {
+    display: flex; align-items: center; gap: 10px; margin-bottom: 10px;
+    padding: 10px 14px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 10px; cursor: pointer; user-select: none;
+  }
+  .store-header:hover { border-color: var(--accent); }
+  .store-header .icon { font-size: 20px; }
+  .store-header .name { font-weight: 600; flex: 1; }
+  .store-header .count { font-size: 12px; color: var(--muted); }
+  .store-header .arrow { transition: transform 0.2s; color: var(--muted); }
+  .store-header.collapsed .arrow { transform: rotate(-90deg); }
+  .store-body { display: flex; flex-direction: column; gap: 6px; margin-left: 8px; }
+  .store-body.hidden { display: none; }
+
+  /* Product rows */
+  .product-row {
+    display: flex; align-items: center; gap: 12px;
+    padding: 10px 14px; background: var(--card); border: 1px solid var(--border);
+    border-radius: 8px; transition: border-color 0.2s;
+  }
+  .product-row.in-stock { border-color: rgba(34,197,94,0.3); }
+  .product-row .dot {
+    width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0;
+  }
+  .product-row .dot.in-stock { background: var(--green); box-shadow: 0 0 8px rgba(34,197,94,0.4); }
+  .product-row .dot.out { background: var(--red); }
+  .product-row .dot.unknown { background: var(--muted); }
+  .product-row .name { flex: 1; font-size: 14px; font-weight: 500; }
+  .product-row .price { font-size: 13px; color: var(--muted); }
+  .product-row .time { font-size: 11px; color: var(--muted); white-space: nowrap; }
+  .product-row .tag {
+    font-size: 10px; padding: 2px 6px; border-radius: 4px;
+    background: var(--border); color: var(--muted); text-transform: uppercase;
+    letter-spacing: 0.3px;
+  }
+
+  /* Events section */
+  .events-title { font-size: 16px; font-weight: 600; margin: 24px 0 12px; }
+  .event-item {
+    display: flex; align-items: center; gap: 10px;
+    padding: 8px 12px; font-size: 13px;
+    background: var(--card); border: 1px solid var(--border); border-radius: 8px;
+    margin-bottom: 4px;
+  }
+  .event-item .evt-icon { font-size: 16px; }
+
+  /* Loading */
+  .loading {
+    text-align: center; padding: 60px 20px; color: var(--muted);
+  }
+  .spinner {
+    width: 24px; height: 24px; border: 3px solid var(--border);
+    border-top-color: var(--accent); border-radius: 50%;
+    animation: spin 0.8s linear infinite; margin: 0 auto 12px;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Responsive */
+  @media (max-width: 600px) {
+    body { padding: 12px; }
+    .header h1 { font-size: 20px; }
+    .product-row { flex-wrap: wrap; gap: 6px; }
+    .product-row .name { width: 100%; order: -1; }
+    .product-row .time { font-size: 10px; }
+  }
+</style>
+</head>
+<body>
+<div class="container" id="app">
+  <div class="loading">
+    <div class="spinner"></div>
+    Loading stock data...
+  </div>
+</div>
+
+<script>
+const API_BASE = '';
+
+async function fetchJSON(path) {
+  const res = await fetch(`${API_BASE}${path}`);
+  return res.json();
+}
+
+function timeAgo(dateStr) {
+  if (!dateStr) return '';
+  const diff = Date.now() - new Date(dateStr + 'Z').getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs/24)}d ago`;
+}
+
+function relativeTime(dateStr) {
+  if (!dateStr) return '';
+  const d = new Date(dateStr + 'Z');
+  return d.toLocaleString('en-US', {month:'short', day:'numeric', hour:'numeric', minute:'2-digit'});
+}
+
+const STORE_ICONS = {
+  target: '🎯',
+  bestbuy: '💙',
+  walmart: '🛒',
+};
+
+const PRIORITY_ORDER = ['Prismatic Evolutions ETB', 'Prismatic Evolutions Booster Bundle', '151 Booster Bundle', 'Surging Sparks ETB', 'Surging Sparks Booster Bundle', 'Paldean Fates ETB', 'Paldean Fates Booster Bundle', 'Twilight Masquerade Booster Bundle'];
+
+function sortProducts(products) {
+  return [...products].sort((a, b) => {
+    const ai = PRIORITY_ORDER.indexOf(a.product_name);
+    const bi = PRIORITY_ORDER.indexOf(b.product_name);
+    if (ai !== -1 && bi !== -1) return ai - bi;
+    if (ai !== -1) return -1;
+    if (bi !== -1) return 1;
+    return a.product_name.localeCompare(b.product_name);
+  });
+}
+
+function renderApp(summary, status, events) {
+  const root = document.getElementById('app');
+  
+  // Group status by store chain then store
+  const stores = {};
+  for (const s of status) {
+    const key = `${s.store_chain}:${s.store_name}`;
+    if (!stores[key]) stores[key] = { chain: s.store_chain, name: s.store_name, products: [] };
+    stores[key].products.push(s);
+  }
+  
+  // Sort stores: in-stock first
+  const sortedStores = Object.entries(stores)
+    .map(([k,v]) => v)
+    .sort((a,b) => {
+      const aIn = a.products.some(p => p.in_stock) ? 0 : 1;
+      const bIn = b.products.some(p => p.in_stock) ? 0 : 1;
+      if (aIn !== bIn) return aIn - bIn;
+      return a.name.localeCompare(b.name);
+    });
+
+  const inStockCount = status.filter(s => s.in_stock).length;
+  const storeCount = sortedStores.length;
+
+  let html = `
+    <div class="header">
+      <h1>⚡ PokeAPI</h1>
+      <div class="header-info">
+        <span class="badge live">● Live</span>
+        <span class="badge">${summary.last_check ? timeAgo(summary.last_check) : 'never'}</span>
+        <span class="badge">${summary.total_checks} checks</span>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="stat-card">
+        <div class="num accent">${status.length}</div>
+        <div class="label">Product Checks</div>
+      </div>
+      <div class="stat-card">
+        <div class="num green">${inStockCount}</div>
+        <div class="label">In Stock</div>
+      </div>
+      <div class="stat-card">
+        <div class="num red">${status.length - inStockCount}</div>
+        <div class="label">Out of Stock</div>
+      </div>
+      <div class="stat-card">
+        <div class="num accent">${storeCount}</div>
+        <div class="label">Stores Tracked</div>
+      </div>
+    </div>
+  `;
+
+  // Store sections
+  for (const store of sortedStores) {
+    const icon = STORE_ICONS[store.chain] || '🏪';
+    const sorted = sortProducts(store.products);
+    const anyIn = sorted.some(p => p.in_stock);
+
+    html += `
+      <div class="store-section">
+        <div class="store-header" onclick="this.classList.toggle('collapsed'); this.nextElementSibling.classList.toggle('hidden')">
+          <span class="icon">${icon}</span>
+          <span class="name">${store.name}</span>
+          <span class="count">${sorted.length} products</span>
+          <span class="arrow">▼</span>
+        </div>
+        <div class="store-body">
+    `;
+
+    for (const p of sorted) {
+      const dotClass = p.in_stock ? 'in-stock' : (p.stock_level === 'OUT_OF_STOCK' || p.stock_level === 'NO_DATA' ? 'out' : 'unknown');
+      const tagText = p.in_stock ? 'IN STOCK' : (p.stock_level || 'OUT');
+      html += `
+        <div class="product-row ${p.in_stock ? 'in-stock' : ''}">
+          <span class="dot ${dotClass}"></span>
+          <span class="name">${p.product}</span>
+          ${p.price ? `<span class="price">${p.price}</span>` : ''}
+          <span class="tag">${tagText}</span>
+          <span class="time">${timeAgo(p.checked_at)}</span>
+        </div>
+      `;
+    }
+
+    html += `</div></div>`;
+  }
+
+  // Recent events
+  const restocks = events.filter(e => e.in_stock).slice(0, 20);
+  if (restocks.length > 0) {
+    html += `<div class="events-title">📈 Recent Restocks</div>`;
+    for (const e of restocks) {
+      const icon = STORE_ICONS[e.store_chain] || '🏪';
+      html += `
+        <div class="event-item">
+          <span class="evt-icon">${icon}</span>
+          <strong>${e.product}</strong>
+          <span style="color:var(--muted)">at ${e.store_name}</span>
+          <span style="color:var(--muted);margin-left:auto">${relativeTime(e.checked_at)}</span>
+        </div>
+      `;
+    }
+  } else {
+    html += `<div class="events-title">📈 Recent Restocks</div>
+      <div class="event-item" style="color:var(--muted)">No restocks recorded yet</div>`;
+  }
+
+  root.innerHTML = html;
+}
+
+async function refresh() {
+  try {
+    const [summary, status, events] = await Promise.all([
+      fetchJSON('/api/summary'),
+      fetchJSON('/api/status'),
+      fetchJSON('/api/events'),
+    ]);
+    renderApp(summary, status, events);
+  } catch (e) {
+    document.getElementById('app').innerHTML = `
+      <div class="loading">
+        <div style="font-size:40px;margin-bottom:12px">⚠️</div>
+        <p>Could not load data. Is the server running?</p>
+        <p style="font-size:12px;color:var(--muted);margin-top:8px">python3 server.py</p>
+      </div>
+    `;
+  }
+}
+
+// Initial load + auto-refresh every 30s
+refresh();
+setInterval(refresh, 30000);
+</script>
+</body>
+</html>
